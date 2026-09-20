@@ -1,0 +1,25 @@
+# Build outputs
+build/bin
+build/darwin
+build/windows
+build/linux
+frontend/dist
+
+# Node
+node_modules
+
+# Binaries / packages
+*.app
+*.exe
+*.deb
+*.rpm
+
+# OS
+.DS_Store
+
+# Project-local binary artifact
+/intraflow
+
+# Tooling / planning (not part of the shipped app)
+openspec/
+.opencode/
