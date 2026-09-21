@@ -36,6 +36,14 @@ static void smFreeCString(char *p) {
     free(p);
 }
 
+// smBoolToInt normalizes an Objective-C BOOL to a plain int. BOOL is a signed
+// char on 64-bit Intel but a C bool on Apple Silicon, so cgo exposes it as
+// different Go types per architecture; returning int keeps the Go side portable
+// across the darwin/universal build.
+static int smBoolToInt(BOOL v) {
+    return v ? 1 : 0;
+}
+
 // smAppServiceAvailable returns YES if the SMAppService API is present at
 // runtime, i.e. the OS is macOS 13.0 (Ventura) or newer.
 static BOOL smAppServiceAvailableImpl(void) {
@@ -133,7 +141,7 @@ var errSMAppNotBundled = errors.New("autostart: process is not bundled in a .app
 // runtime (macOS >= 13.0). This is the default implementation of
 // darwinSMAppServiceAvailable; tests may swap that var to simulate older OSes.
 func smAppServiceAvailable() bool {
-	return bool(C.smAppServiceAvailableImpl())
+	return C.smBoolToInt(C.smAppServiceAvailableImpl()) != 0
 }
 
 // smAppServiceStatus queries the live SMAppService registration status of the
@@ -171,18 +179,18 @@ func smAppServiceStatus() (AutoStartState, error) {
 // path.
 func smAppServiceSetEnabled(enabled bool) error {
 	var cerr *C.char
-	var ok C.BOOL
+	var ok C.int
 	if enabled {
-		ok = C.smAppServiceRegisterImpl(&cerr)
+		ok = C.smBoolToInt(C.smAppServiceRegisterImpl(&cerr))
 	} else {
-		ok = C.smAppServiceUnregisterImpl(&cerr)
+		ok = C.smBoolToInt(C.smAppServiceUnregisterImpl(&cerr))
 	}
 	var msg string
 	if cerr != nil {
 		msg = C.GoString(cerr)
 		C.smFreeCString(cerr)
 	}
-	if !ok {
+	if ok == 0 {
 		// Detect the "not bundled" condition from the bridge's own message
 		// and translate it to errSMAppNotBundled for clean fallback.
 		if msg == "not bundled in a .app" {
