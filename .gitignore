@@ -1,9 +1,12 @@
 # Build outputs
 build/bin
-build/darwin
-build/windows
-build/linux
 frontend/dist
+
+# Wails-generated build assets (regenerated from embedded templates each build).
+# The surrounding build/<platform>/ files ARE tracked on purpose: they carry the
+# bundle identifier, entitlements and product metadata the release workflow needs.
+build/windows/installer/wails_tools.nsh
+build/windows/icon.ico
 
 # Node
 node_modules

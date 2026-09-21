@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      IntraFlow ships outside the App Store and is not sandboxed, so it does NOT
+      need the app-sandbox entitlement.
+
+      Notarization requires only the Hardened Runtime flag, which the release
+      workflow adds through the codesign "options runtime" argument. Sandboxing
+      is a separate, stricter mode and is not required for direct distribution.
+
+      This dictionary is deliberately empty: add an entitlement here only when a
+      capability genuinely requires one. The usual candidates, should a future
+      feature need them, are the network client entitlement and the JIT
+      entitlement. Neither is needed today, because the app reaches the network
+      only through sockets it already owns and WebKit needs no JIT entitlement
+      outside the sandbox.
+
+      Keep this file free of double hyphens inside comments: the code signing
+      tooling rejects them, unlike plutil.
+    -->
+</dict>
+</plist>

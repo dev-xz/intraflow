@@ -10,5 +10,12 @@
   "author": {
     "name": "dev-xz",
     "email": "dev-xz@outlook.com"
+  },
+  "info": {
+    "companyName": "IntraFlow",
+    "productName": "IntraFlow",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright (c) IntraFlow",
+    "comments": "IntraFlow - 内网接管工具"
   }
 }
