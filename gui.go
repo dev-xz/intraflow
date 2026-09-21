@@ -30,8 +30,13 @@ const openSettingsFlag = "--open-settings"
 // (the host must never call osascript). The full flag is "--elevate=pause" or
 // "--elevate=resume". The spawned GUI dials IPC, runs the corresponding
 // two-phase flow (Prepare → WriteHostsElevated → Complete) from onDomReady,
-// and then quits so no window lingers. A brief window flash on this path is
-// acceptable and documented in host.go's onPause/onResume.
+// and then quits so no window lingers.
+//
+// This helper window is created with StartHidden=true so no window is ever
+// ordered front — the tray pause/resume click must not flash a panel. The GUI
+// still runs Wails as a Regular activation-policy app (Wails sets that
+// unconditionally), so the osascript admin dialog attaches to a foreground
+// app as required; only makeKeyAndOrderFront is skipped for the hidden window.
 const elevateFlag = "--elevate"
 
 // confirmQuitFlag is the CLI flag the host appends when spawning a GUI from
@@ -108,6 +113,9 @@ func runGUI() {
 	//   - recordsChanged → re-emit a Wails event so the open panel refreshes.
 	//   - openSettings → re-emit a Wails event so the frontend opens the
 	//     settings modal (tray "设置..." while GUI already running).
+	//   - focusWindow → re-emit a Wails "focusWindow" event so the frontend
+	//     raises and focuses this window (tray "打开主界面" while GUI already
+	//     running; the host cannot touch this process's window directly).
 	//   - elevatePause / elevateResume → run the corresponding two-phase
 	//     flow on the already-running GUI (the tray click needs an elevated
 	//     hosts write and the host cannot call osascript). This path is the
@@ -122,6 +130,8 @@ func runGUI() {
 			app.emitRecordsChanged()
 		case ipc.EventOpenSettings:
 			app.emitOpenSettings()
+		case ipc.EventFocusWindow:
+			app.emitFocusWindow()
 		case ipc.EventElevatePause:
 			go func() {
 				_ = app.Pause()
@@ -141,10 +151,24 @@ func runGUI() {
 	// close), so closing the window quits the GUI process; OnShutdown closes
 	// the IPC client. The host's cmd.Wait goroutine then fires and clears
 	// the GUI-running flag.
+	//
+	// StartHidden is set ONLY for the --elevate helper: that process exists
+	// solely to run the osascript admin prompt and quit, so its window must
+	// never be ordered front (a tray pause/resume click used to flash a panel
+	// here). A normal GUI (plain --gui, --open-settings, --confirm-quit) must
+	// still show its window, so StartHidden stays false for those paths.
+	//
+	// Hiding the window does NOT break the admin dialog: Wails still sets a
+	// Regular activation policy and calls activateIgnoringOtherApps on finish
+	// launching, so by the time onDomReady runs osascript the app is the active
+	// app — the same "activate, then prompt" ordering a menu-bar agent uses to
+	// surface the SecurityAgent password dialog. Only makeKeyAndOrderFront is
+	// skipped for the hidden window.
 	err = wails.Run(&options.App{
-		Title:  "intraflow",
-		Width:  1024,
-		Height: 768,
+		Title:       "intraflow",
+		Width:       1024,
+		Height:      768,
+		StartHidden: elevateAction != "",
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

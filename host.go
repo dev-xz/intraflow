@@ -168,11 +168,23 @@ type guiState struct {
 	cmd     *exec.Cmd
 }
 
-// onOpen is the tray "打开主界面" handler. It spawns the GUI process if one
-// is not already running. If a GUI is already running, this is a no-op for
-// MVP (focusing an existing window across processes is best-effort and not
-// worth the platform-specific glue here).
+// onOpen is the tray "打开主界面" handler. If no GUI is running it spawns one
+// (whose window shows itself normally). If a GUI is already running, it
+// broadcasts a focusWindow IPC event so the existing window is raised and
+// focused instead of silently doing nothing — the host cannot touch another
+// process's window directly, so the running GUI performs the raise itself.
 func (h *hostState) onOpen() {
+	h.gui.mu.Lock()
+	running := h.gui.running
+	h.gui.mu.Unlock()
+	if running {
+		if h.ipcServer != nil {
+			if err := h.ipcServer.BroadcastEvent(ipc.EventFocusWindow, nil); err != nil {
+				log.Printf("host: broadcast focusWindow: %v", err)
+			}
+		}
+		return
+	}
 	h.spawnGUI()
 }
 
@@ -292,8 +304,10 @@ func (h *hostState) teardownAndQuit() {
 //
 //  2. No GUI is running: spawn a short-lived GUI with --elevate=pause. That
 //     process dials IPC, runs App.Pause() from onDomReady (Prepare →
-//     WriteHostsElevated → Complete), then quits. A brief window flash is
-//     acceptable and documented.
+//     WriteHostsElevated → Complete), then quits. The spawned window is
+//     created with StartHidden=true (see gui.go) so the tray click does not
+//     flash a panel; Wails still activates the app as a Regular actor, so the
+//     osascript admin dialog still surfaces.
 //
 // In both paths the actual hosts write happens inside the GUI process, so the
 // osascript admin dialog attaches to a foreground windowed app as required.

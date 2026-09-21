@@ -82,6 +82,15 @@ const (
 	// event so the frontend opens the settings modal.
 	EventOpenSettings = "openSettings"
 
+	// EventFocusWindow is broadcast when the user clicks "打开主界面" in the
+	// tray while the GUI is already open. The host cannot manipulate the GUI
+	// process's window directly (separate process), so it asks the running GUI
+	// to raise and focus its window: the GUI emits a Wails "focusWindow" event
+	// and the frontend calls WindowUnminimise + WindowShow. When no GUI is
+	// running, the host instead spawns one (the normal window shows itself).
+	// The payload is empty.
+	EventFocusWindow = "focusWindow"
+
 	// EventElevatePause is broadcast when the user clicks "暂停托管" in the
 	// tray while the GUI is already open. The host cannot run osascript (it
 	// is a background menu-bar daemon), so it asks the running GUI to perform

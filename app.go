@@ -147,6 +147,20 @@ func (a *App) emitConfirmQuit() {
 	wailsruntime.EventsEmit(a.ctx, "confirmQuit")
 }
 
+// emitFocusWindow emits a Wails "focusWindow" event so the frontend raises and
+// focuses this window. Called from the IPC OnEvent handler when the user
+// clicked "打开主界面" in the tray while the GUI was already running: the host
+// runs in a separate process and cannot manipulate this process's window, so
+// it delegates the raise to the frontend (WindowUnminimise + WindowShow). This
+// only applies to an already-running GUI — when none was running the host
+// spawns a fresh GUI whose window shows itself normally.
+func (a *App) emitFocusWindow() {
+	if a.ctx == nil {
+		return
+	}
+	wailsruntime.EventsEmit(a.ctx, "focusWindow")
+}
+
 // PendingAction returns the one-shot spawn-flag-driven action the frontend
 // should perform once its init sequence has run and its EventsOn listeners
 // are subscribed, then clears it. Values: "settings" (open the settings
