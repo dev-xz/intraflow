@@ -1,0 +1,550 @@
+name: Release
+
+# Tag a release to build and publish all three platform binaries:
+#
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# `workflow_dispatch` runs the same matrix without creating a GitHub Release, so
+# you can smoke-test the pipeline from a branch.
+#
+# Signing is opt-in: it activates only when the corresponding repository secrets
+# exist, and unsigned builds still succeed and are still uploaded. The secret
+# names and their setup are documented in README.md under "Release / signing".
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WAILS_VERSION: v2.16.0
+  NODE_VERSION: '22'
+  APP_NAME: intraflow
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS — must be built on a macOS runner; cross-compiling to darwin is not
+  # supported by Wails v2. `darwin/universal` compiles amd64 + arm64 and lipos
+  # them into a single .app.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          # NSIS VIProductVersion and CFBundleVersion need numeric-only segments,
+          # so strip any pre-release/build suffix for the in-bundle metadata.
+          VERSION_NUMERIC="${VERSION%%-*}"
+          if [[ ! "$VERSION_NUMERIC" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            echo "::error::Tag '$VERSION' is not a numeric semver (expected e.g. v1.2.3 or v1.2.3-rc.1)."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_numeric=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
+          echo "Building IntraFlow $VERSION (metadata $VERSION_NUMERIC)"
+
+      - name: Sync productVersion into wails.json
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.version_numeric }}
+        run: |
+          set -euo pipefail
+          sed -i.bak -E \
+            's/("productVersion"[[:space:]]*:[[:space:]]*")[^"]*(")/\1'"${VERSION_NUMERIC}"'\2/' \
+            wails.json
+          rm -f wails.json.bak
+          grep -n '"productVersion"' wails.json
+
+      - name: Detect signing configuration
+        id: sign
+        env:
+          P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$P12_BASE64" && -n "$P12_PASSWORD" && -n "$SIGN_IDENTITY" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            if [[ -n "$APPLE_ID" && -n "$APPLE_TEAM_ID" && -n "$APPLE_APP_PASSWORD" ]]; then
+              echo "notarize=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "notarize=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Developer ID signing is on but notarization secrets are missing; the build will be signed but not notarized."
+            fi
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No macOS signing secrets found - producing an unsigned build."
+          fi
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+
+      - name: Build app bundle
+        run: wails build -platform darwin/universal -clean -trimpath
+
+      - name: Sign app bundle (Developer ID + hardened runtime)
+        if: steps.sign.outputs.enabled == 'true'
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          APP_BUNDLE="build/bin/${APP_NAME}.app"
+          KEYCHAIN="$RUNNER_TEMP/intraflow-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          # Without this, codesign cannot use the imported key non-interactively.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+
+          # `wails build` ad-hoc signs the bundle so notifications work. That
+          # signature is not a Developer ID signature and must be replaced.
+          codesign --remove-signature "$APP_BUNDLE" || true
+
+          # Sign the inner Mach-O first, then the bundle (Apple's recommended
+          # order; the Wails bundle contains a single executable).
+          codesign --force --options runtime --timestamp \
+            --sign "$MACOS_SIGN_IDENTITY" \
+            --entitlements build/darwin/entitlements.plist \
+            "$APP_BUNDLE/Contents/MacOS/${APP_NAME}"
+
+          codesign --force --options runtime --timestamp \
+            --sign "$MACOS_SIGN_IDENTITY" \
+            --entitlements build/darwin/entitlements.plist \
+            "$APP_BUNDLE"
+
+          codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+          codesign -dv --verbose=4 "$APP_BUNDLE"
+          echo "notarize_zip=$RUNNER_TEMP/notarize.zip" >> "$GITHUB_ENV"
+
+      - name: Create notarization archive
+        if: steps.sign.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent "build/bin/${APP_NAME}.app" "$RUNNER_TEMP/notarize.zip"
+
+      - name: Notarize and staple
+        if: steps.sign.outputs.notarize == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APP_BUNDLE="build/bin/${APP_NAME}.app"
+
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait --timeout 30m
+
+          # Staple the ticket so the app validates offline / first launch.
+          xcrun stapler staple "$APP_BUNDLE"
+          xcrun stapler validate "$APP_BUNDLE"
+          spctl --assess --type execute --verbose=4 "$APP_BUNDLE"
+
+      - name: Package release archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Created after signing/staping so the released zip carries the ticket.
+          ditto -c -k --keepParent "build/bin/${APP_NAME}.app" \
+            "dist/${APP_NAME}-${VERSION}-macos-universal.zip"
+          ls -lh dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows — built on a Windows runner. NSIS is needed for the installer, and
+  # the Wails NSIS script embeds the WebView2 bootstrapper.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Windows (amd64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          VERSION_NUMERIC="${VERSION%%-*}"
+          if [[ ! "$VERSION_NUMERIC" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            echo "::error::Tag '$VERSION' is not a numeric semver (expected e.g. v1.2.3 or v1.2.3-rc.1)."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_numeric=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
+
+      - name: Sync productVersion into wails.json
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.version_numeric }}
+        run: |
+          set -euo pipefail
+          sed -i.bak -E \
+            's/("productVersion"[[:space:]]*:[[:space:]]*")[^"]*(")/\1'"${VERSION_NUMERIC}"'\2/' \
+            wails.json
+          rm -f wails.json.bak
+          grep -n '"productVersion"' wails.json
+
+      - name: Ensure NSIS is available
+        run: |
+          set -euo pipefail
+          if command -v makensis >/dev/null 2>&1; then
+            makensis -VERSION
+            exit 0
+          fi
+          choco install nsis -y --no-progress
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+
+      - name: Build binary + NSIS installer
+        run: wails build -platform windows/amd64 -nsis -clean -trimpath
+
+      - name: Detect signing configuration
+        id: sign
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$PFX_BASE64" && -n "$PFX_PASSWORD" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Windows signing secret found - producing an unsigned build."
+          fi
+
+      - name: Sign binaries
+        if: steps.sign.outputs.enabled == 'true'
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$WINDOWS_CERT_PFX_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.pfx"
+
+          SIGNS=(
+            "build/bin/${APP_NAME}.exe"
+            "build/bin/${APP_NAME}-amd64-installer.exe"
+          )
+          for f in "${SIGNS[@]}"; do
+            # /fd sha256 + RFC3161 timestamp; timestamping is required or the
+            # signature expires with the certificate.
+            signtool sign /v /fd SHA256 \
+              /f "$(cygpath -w "$RUNNER_TEMP/cert.pfx")" \
+              /p "$WINDOWS_CERT_PASSWORD" \
+              /tr http://timestamp.digicert.com /td SHA256 \
+              "$(cygpath -w "$f")"
+            signtool verify /pa /v "$(cygpath -w "$f")"
+          done
+
+      - name: Package release assets
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "build/bin/${APP_NAME}-amd64-installer.exe" \
+             "dist/${APP_NAME}-${VERSION}-windows-amd64-installer.exe"
+          cp "build/bin/${APP_NAME}.exe" \
+             "dist/${APP_NAME}-${VERSION}-windows-amd64.exe"
+          ls -lh dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux — Wails v2 links against WebKitGTK via cgo, so this must run on Linux.
+  # Ubuntu 24.04 only ships webkit2gtk-4.1, which requires the `webkit2_41`
+  # build tag; without it the build fails looking for webkit2gtk-4.0.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    name: Linux (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          VERSION_NUMERIC="${VERSION%%-*}"
+          if [[ ! "$VERSION_NUMERIC" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            echo "::error::Tag '$VERSION' is not a numeric semver (expected e.g. v1.2.3 or v1.2.3-rc.1)."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_numeric=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
+
+      - name: Sync productVersion into wails.json
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.version_numeric }}
+        run: |
+          set -euo pipefail
+          sed -i.bak -E \
+            's/("productVersion"[[:space:]]*:[[:space:]]*")[^"]*(")/\1'"${VERSION_NUMERIC}"'\2/' \
+            wails.json
+          rm -f wails.json.bak
+          grep -n '"productVersion"' wails.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+
+      - name: Build binary
+        run: wails build -platform linux/amd64 -tags webkit2_41 -clean -trimpath
+
+      - name: Package release archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/${APP_NAME}-${VERSION}-linux-amd64.tar.gz" \
+            -C build/bin "${APP_NAME}"
+          ls -lh dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish — only on tag pushes. Downloads every matrix artifact and attaches
+  # them to a GitHub Release with auto-generated notes.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+
+  # ---------------------------------------------------------------------------
+  # Homebrew tap — pushes the new version + checksum into dev-xz/homebrew-tap so
+  # `brew install dev-xz/tap/intraflow` always serves the latest release.
+  #
+  # Requires a HOMEBREW_TAP_TOKEN secret: a fine-grained PAT with
+  # "Contents: Read and write" on the dev-xz/homebrew-tap repository. The default
+  # GITHUB_TOKEN cannot push to a different repository. Without the secret this
+  # job is skipped, so releases still succeed.
+  # ---------------------------------------------------------------------------
+  homebrew-tap:
+    name: Update Homebrew tap
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Detect tap token
+        id: token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -n "$HOMEBREW_TAP_TOKEN" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HOMEBREW_TAP_TOKEN not set - skipping Homebrew tap update."
+          fi
+
+      - name: Download the published macOS zip
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Use the exact asset users download, so the checksum matches the release.
+          gh release download "v${VERSION}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${APP_NAME}-${VERSION}-macos-universal.zip" \
+            --dir tap-dl
+
+      - name: Compute checksum
+        if: steps.token.outputs.enabled == 'true'
+        id: sha
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          SHA="$(sha256sum "tap-dl/${APP_NAME}-${VERSION}-macos-universal.zip" | awk '{print $1}')"
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "macOS universal zip sha256: ${SHA}"
+
+      - name: Checkout tap
+        if: steps.token.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: dev-xz/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update cask
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          CASK=tap/Casks/intraflow.rb
+          if [[ ! -f "$CASK" ]]; then
+            echo "::error::tap/Casks/intraflow.rb not found - seed the tap repo with packaging/homebrew/Casks/intraflow.rb first."
+            exit 1
+          fi
+          sed -i -E "s/^  version \".*\"/  version \"${VERSION}\"/" "$CASK"
+          sed -i -E "s/^  sha256 \".*\"/  sha256 \"${SHA256}\"/" "$CASK"
+          echo "--- updated cask ---"
+          grep -nE '^  (version|sha256)' "$CASK"
+          # Fail the job rather than pushing a broken cask.
+          ruby -c "$CASK"
+
+      - name: Commit and push tap
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Tap already up to date for ${VERSION}."
+            exit 0
+          fi
+          git add Casks/intraflow.rb
+          git commit -m "intraflow ${VERSION}"
+          git push
