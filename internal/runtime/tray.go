@@ -8,12 +8,10 @@
 // symbol (which causes duplicate-symbol linker errors on darwin). The public
 // API is identical to fyne-io/getlantern systray.
 //
-// On macOS the tray's native event loop must run on the main thread.
-// systray.Run(onReady, onExit) blocks until systray.Quit() is called. Because
-// Wails also needs the main thread for its NSApplication loop on macOS, the
-// integration pattern used here is: main() calls RunTray(...) directly
-// (blocking the main goroutine), and inside systray's onReady callback Wails
-// is launched in a separate goroutine. See main.go for the wiring.
+// On macOS the tray's native event loop must run on the main thread, while
+// systray invokes onReady on a worker goroutine. The host uses RegisterTray
+// with systray's external-loop integration to run alongside Wails' separate
+// GUI process.
 package runtime
 
 import (
@@ -46,8 +44,11 @@ type TrayState struct {
 // Every callback is invoked from a systray menu-click goroutine. Implementors
 // must be safe to call from arbitrary goroutines.
 type TrayCallbacks struct {
-	// OnOpen is invoked when the user clicks "打开主界面". Typically the host
-	// spawns the GUI child process (intraflow --gui).
+	// OnOpen is invoked when the user clicks "打开主界面", and also when the
+	// user re-launches the already-running app (Finder double-click / Dock /
+	// Launchpad) on macOS — both mean "show me the panel". The host either
+	// spawns the GUI child process (intraflow --gui) when none is running, or
+	// raises the existing window.
 	OnOpen func()
 
 	// OnOpenSettings is invoked when the user clicks "设置...". The host
@@ -55,6 +56,13 @@ type TrayCallbacks struct {
 	// running, or broadcasting an openSettings IPC event to an already-open
 	// GUI) so the frontend opens the settings modal.
 	OnOpenSettings func()
+
+	// OnReopen is invoked when the macOS user re-launches the already-running
+	// app from Finder, the Dock, or Launchpad (the kAEReopenApplication Apple
+	// event). It means the same thing as OnOpen — "show me the panel" — but is
+	// kept separate because it also fires with no tray interaction at all, and
+	// only on macOS. Nil on other platforms.
+	OnReopen func()
 
 	// OnPause is invoked when the user clicks "暂停托管" (label shown when
 	// not paused). The host triggers the elevated pause flow (PreparePause →
@@ -89,6 +97,8 @@ type Tray struct {
 	cb TrayCallbacks
 
 	mu sync.Mutex
+	// iconMu serializes native icon updates separately from menu/state access.
+	iconMu sync.Mutex
 
 	// menuReady is set true once onReady has fired and the icon/tooltip are
 	// configured. buildMenu is a no-op until then (ResetMenu before the
@@ -100,6 +110,11 @@ type Tray struct {
 	// the correct title and pause/resume label without needing the host to
 	// re-push anything else.
 	lastState TrayState
+
+	// lastIconPaused and iconInstalled are protected by iconMu. The latter
+	// ensures the initial hosted icon is installed even for the zero state.
+	lastIconPaused bool
+	iconInstalled  bool
 
 	stopCh chan struct{}
 	start  func()
@@ -135,8 +150,8 @@ func RunTray(cb TrayCallbacks) *Tray {
 //
 // This is the correct entry point for the dual-process host: the host creates
 // the tray, starts its IPC server in a goroutine, then calls Run on the main
-// goroutine. IPC handlers can call Refresh on the returned *Tray as soon as
-// the menu is ready (Refresh is a no-op before onReady fires).
+// goroutine. IPC handlers can call Refresh on the returned *Tray before the
+// menu is ready; onReady applies the last state they pushed.
 func CreateTray(cb TrayCallbacks) *Tray {
 	return &Tray{
 		cb:     cb,
@@ -197,32 +212,63 @@ func (t *Tray) End() {
 // it once with the last-pushed state (zero values if nothing pushed yet) so
 // the icon appears with a coherent menu the moment it shows up.
 func (t *Tray) onReady() {
-	// Use an icon image instead of text title for a proper menu-bar item.
-	// SetTitle shows literal text in the menu bar (ugly); SetIcon shows a
-	// template image that adapts to light/dark mode.
-	iconBytes, err := embeddedIcon()
-	if err != nil {
-		// Fallback: no icon, keep the text title so the item is at least visible.
-		systray.SetTitle("IF")
-	} else {
-		systray.SetIcon(iconBytes)
-	}
-	systray.SetTooltip("IntraFlow")
-
 	// Ensure the host process does not show a Dock icon — it's a menu-bar-only
 	// daemon. This runs inside onReady which fires after NSApplication is up,
 	// so setActivationPolicy is safe here.
 	SetHostAccessoryPolicy()
 
+	// Use an icon image instead of a text title for a proper menu-bar item.
+	// SetTitle shows literal text in the menu bar (ugly); SetTemplateIcon
+	// installs a monochrome template image that macOS re-tints for light/dark
+	// menu bars. The hosted/paused asset pair is chosen by the hosting state.
+	t.applyIcon()
+
+	systray.SetTooltip("IntraFlow")
+
+	// Register for the macOS "user relaunched the running app" Apple event, so
+	// a second launch from Finder/Dock/Launchpad opens the panel instead of
+	// silently doing nothing (see reopen_darwin.go). Registration must happen
+	// here: NSApp and its event machinery are only up once onReady fires.
+	// systray calls onReady from a worker goroutine; registration synchronously
+	// switches to the main queue before returning.
+	if t.cb.OnReopen != nil {
+		RegisterReopenHandler(func() {
+			// The Apple-event handler runs on the main thread; hand off so a
+			// slow GUI spawn never stalls the native run loop.
+			go t.cb.OnReopen()
+		})
+	}
+
 	t.mu.Lock()
 	t.menuReady = true
-	state := t.lastState
 	t.mu.Unlock()
 
-	// buildMenu uses the stored state; if the host has not pushed anything
-	// yet, the title still renders with zero counts and the pause/resume
-	// item reads "暂停托管".
-	t.buildMenuLocked(state)
+	// A refresh while menuReady was false may have changed the state after the
+	// first icon update. Pick up that state before building the initial menu.
+	t.applyIcon()
+	t.buildMenu()
+}
+
+// applyIcon installs the menu-bar icon for the latest hosting state. The caller
+// must not hold t.mu. iconMu keeps concurrent native updates in state order.
+//
+// On macOS SetTemplateIcon marks the image as a template so it adapts to the
+// menu-bar appearance; on Windows/Linux systray ignores the template bytes and
+// uses the colour fallback.
+func (t *Tray) applyIcon() {
+	t.iconMu.Lock()
+	defer t.iconMu.Unlock()
+
+	t.mu.Lock()
+	paused := t.lastState.Paused
+	t.mu.Unlock()
+	if t.iconInstalled && t.lastIconPaused == paused {
+		return
+	}
+	template, regular := trayIcon(paused)
+	systray.SetTemplateIcon(template, regular)
+	t.lastIconPaused = paused
+	t.iconInstalled = true
 }
 
 // onExit is systray's exit callback. It closes stopCh so any waiter (main)
@@ -249,39 +295,40 @@ func (t *Tray) watch(item *systray.MenuItem, fn func()) {
 	}
 }
 
-// Refresh stores the latest state and rebuilds the menu. It is a no-op until
-// onReady has fired (the menu is not ready before the systray loop is up).
+// Refresh stores the latest state and rebuilds the menu once onReady has fired.
+// Before then, the state is retained for onReady's initial icon and menu.
 // This is the single entry point the host uses besides the systray callbacks;
 // the rebuild-on-refresh design means the title and pause/resume label stay
 // in sync with backend state without any per-item mutation.
 func (t *Tray) Refresh(state TrayState) {
 	t.mu.Lock()
 	t.lastState = state
-	if !t.menuReady {
-		t.mu.Unlock()
+	ready := t.menuReady
+	t.mu.Unlock()
+	if !ready {
 		return
 	}
-	t.mu.Unlock()
+	t.applyIcon()
 	t.buildMenu()
 }
 
 // buildMenu rebuilds the entire menu from the last-pushed state. It calls
 // ResetMenu() and re-adds every item in the correct order, wiring each
 // item's ClickedCh to a fresh goroutine. Callers MUST NOT hold t.mu when
-// calling this (buildMenuLocked acquires/releases it internally so the
-// systray calls are made without holding the lock, avoiding a deadlock with
-// a click handler that may also need the lock).
+// calling this; the rebuild holds it to keep native menu updates ordered.
 func (t *Tray) buildMenu() {
 	t.mu.Lock()
-	state := t.lastState
-	t.mu.Unlock()
-	t.buildMenuLocked(state)
+	defer t.mu.Unlock()
+	if !t.menuReady {
+		return
+	}
+	t.buildMenuLocked(t.lastState)
 }
 
 // buildMenuLocked reconstructs the menu from the given state. It is called
-// by onReady (with the initial state) and by buildMenu (with the last-pushed
-// state). It is the single source of truth for menu layout, so the order is
-// guaranteed regardless of how the host pushed updates.
+// by buildMenu with t.mu held and the last-pushed state. It is the single
+// source of truth for menu layout, so the order is guaranteed regardless of
+// how the host pushed updates.
 //
 // Menu layout (global-only, no per-record section):
 //  1. Disabled title: paused ? "IntraFlow · 已暂停" : "IntraFlow · N 域名 · M 转发中"
@@ -292,13 +339,6 @@ func (t *Tray) buildMenu() {
 //  6. separator
 //  7. 退出
 func (t *Tray) buildMenuLocked(state TrayState) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if !t.menuReady {
-		return
-	}
-
 	// ResetMenu discards every existing item (and closes their ClickedCh,
 	// which lets our watch goroutines exit). We then re-add everything in
 	// order. This is the only way to keep the pause/resume label above the

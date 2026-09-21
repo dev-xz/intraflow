@@ -93,6 +93,9 @@ func runHost() {
 		OnPause:        hs.onPause,
 		OnResume:       hs.onResume,
 		OnQuit:         hs.onQuit,
+		// Re-launching the already-running app (Finder/Dock/Launchpad) means
+		// "show me the panel", exactly like the tray's 打开主界面 entry.
+		OnReopen: hs.onOpen,
 	})
 	hs.tray = tray
 

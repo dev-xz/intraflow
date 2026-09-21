@@ -38,7 +38,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: macOS (universal)
-    runs-on: macos-latest
+    # Icon Composer assets require Xcode 26+ actool.
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -117,7 +118,7 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
 
       - name: Build app bundle
-        run: wails build -platform darwin/universal -clean -trimpath
+        run: bash scripts/build-macos.sh -platform darwin/universal -clean -trimpath
 
       - name: Sign app bundle (Developer ID + hardened runtime)
         if: steps.sign.outputs.enabled == 'true'

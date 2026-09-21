@@ -82,14 +82,18 @@ wails dev
 # 单元测试
 go test ./internal/...
 
-# 打包
-wails build
+# 打包 macOS（需要完整 Xcode 26+，以提供 actool）
+scripts/build-macos.sh
 # 产出: build/bin/intraflow.app
 ```
 
+macOS 图标使用 `build/darwin/AppIcon.icon`。打包脚本通过 Xcode 的 `actool` 生成
+`Assets.car`，加入 Wails 应用包后重新做 ad-hoc 签名；单独运行 `wails build`
+不会更新这个图标资源。
+
 ## 安装
 
-本项目**不做 Apple 公证**（不购买 Apple Developer Program）。macOS 包由 `wails build` 做
+本项目默认**不做 Apple 公证**（不购买 Apple Developer Program）。macOS 打包脚本会做
 ad-hoc 签名 —— 这已足够让开机自启（`SMAppService`）正常工作，但**不足以通过 Gatekeeper**。
 所以从浏览器下载的 zip 首次启动会被拦一次，需要按下面的方式放行。
 
@@ -140,8 +144,8 @@ xattr -d com.apple.quarantine /Applications/intraflow.app
 GitHub Release：
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 也可以在 Actions 页面手动 `workflow_dispatch` 跑一遍不带 Release 的构建。产物命名：
@@ -156,13 +160,17 @@ git push origin v0.1.1
 再进到 `CFBundleShortVersionString` 和 Windows 文件版本信息。tag 必须是数字 semver
 （`v1.2.3` 或 `v1.2.3-rc.1`），预发布后缀只用于产物文件名，不写进 bundle 版本。
 
+macOS CI 用 `scripts/build-macos.sh -platform darwin/universal -clean -trimpath` 构建；
+runner 需要完整 Xcode 26+，以生成新版图标资源并在打包后重新签名。
+
 Linux 构建用 `-tags webkit2_41`：Ubuntu 24.04 只有 `webkit2gtk-4.1`，Wails v2 默认链接的
 `webkit2gtk-4.0` 不存在，不加这个 tag 会在 linking 阶段失败。
 
-### 签名（可选，未配置则出无签名包）
+### 开发者签名（可选）
 
-签名完全是可选的：**只有对应的 secrets 存在时才会执行签名**，否则构建照常成功，只是产物
-未签名。要开启就加下面这些 repository secrets：
+正式签名是可选的：**只有对应的 secrets 存在时才会执行**。未配置时构建照常成功；
+macOS 包仍有 ad-hoc 签名（但未公证），Windows 包不签名。要开启就加下面这些
+repository secrets：
 
 **macOS** — Developer ID 签名 + 公证，需要全部 3 个签名 secret，加上 3 个公证 secret 才做公证：
 
@@ -179,9 +187,10 @@ Linux 构建用 `-tags webkit2_41`：Ubuntu 24.04 只有 `webkit2gtk-4.1`，Wail
 base64 -i DeveloperID.p12 | pbcopy   # 填入 MACOS_CERT_P12_BASE64
 ```
 
-流程是：`wails build` 先做 ad-hoc 签名（为了让通知能工作），workflow 会移除它，再用
-hardened runtime + `build/darwin/entitlements.plist` 重新签名（先内层 Mach-O 再整个
-bundle），然后 `notarytool submit --wait` + `stapler staple`。
+流程是：打包脚本在 `wails build` 后加入 `Assets.car` 并重新做 ad-hoc 签名；配置了证书时，
+workflow 会移除该签名，再用 hardened runtime + `build/darwin/entitlements.plist`
+重新签名（先内层 Mach-O 再整个 bundle），然后 `notarytool submit --wait` +
+`stapler staple`。
 
 **为什么 macOS 值得签名**：签名只影响「首次启动是否被 Gatekeeper 拦」，**不影响开机自启**。
 `wails build` 会自动做 ad-hoc 签名，而 ad-hoc 已满足 `SMAppService` 的要求（实测

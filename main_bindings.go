@@ -31,7 +31,7 @@ func main() {
 	// this and emits the JS bindings, then exits. It does not start a window,
 	// event loop, or any of our runtime layer.
 	_ = wails.Run(&options.App{
-		Title:  "intraflow",
+		Title:  "IntraFlow",
 		Width:  1024,
 		Height: 768,
 		AssetServer: &assetserver.Options{

@@ -3,9 +3,19 @@
 // Package runtime — darwin activation policy bridge for the HOST process.
 //
 // The host process must NOT show a Dock icon (it's a menu-bar-only daemon).
-// systray's own AppDelegate may force Regular policy; we override to
-// Accessory once our host is initialized. The GUI child process is a normal
-// windowed app (Regular) and does not touch this.
+// Two mechanisms enforce that, and both are needed:
+//
+//  1. LSUIElement=true in the bundle Info.plist. This makes LaunchServices
+//     launch the host as an accessory/agent app, which is also what keeps a
+//     *relaunch* (second double-click in Finder / Dock click) from promoting
+//     the running host to a Regular app when LaunchServices activates it.
+//  2. setHostAccessoryPolicy below, which re-asserts the Accessory policy after
+//     systray's own NSApplicationDelegate has come up (systray may force
+//     Regular before our policy is applied).
+//
+// The GUI child process is a normal windowed app (Regular) and does not touch
+// this: Wails' AppDelegate calls setActivationPolicy:Regular unconditionally in
+// the GUI process, and that per-process call is authoritative.
 package runtime
 
 /*

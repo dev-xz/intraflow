@@ -95,10 +95,13 @@ wails dev          # live dev (hot reload)
 go build ./...     # compile check
 go build -tags bindings ./...   # bindings mode must also compile
 go test ./internal/...          # unit + e2e tests
-wails build        # package → build/bin/intraflow.app
+scripts/build-macos.sh  # package macOS app with native icon → build/bin/intraflow.app
 ```
 
-**Before `wails build`**: kill stray processes and clear locks, otherwise the
+The macOS wrapper requires Xcode's `actool`; it adds `Assets.car` to the Wails
+bundle and re-signs it. Plain `wails build` does not update this icon resource.
+
+**Before packaging**: kill stray processes and clear locks, otherwise the
 bindings-mode binary can hang on the single-instance lock:
 
 ```bash

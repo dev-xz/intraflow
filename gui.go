@@ -165,7 +165,7 @@ func runGUI() {
 	// surface the SecurityAgent password dialog. Only makeKeyAndOrderFront is
 	// skipped for the hidden window.
 	err = wails.Run(&options.App{
-		Title:       "intraflow",
+		Title:       "IntraFlow",
 		Width:       1024,
 		Height:      768,
 		StartHidden: elevateAction != "",
