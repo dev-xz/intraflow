@@ -44,17 +44,17 @@ secret is absent.
 If you need to update the tap by hand:
 
 ```bash
-VERSION=0.1.0
+VERSION=0.1.1
 curl -L -o /tmp/intraflow.zip \
   "https://github.com/dev-xz/intraflow/releases/download/v${VERSION}/intraflow-${VERSION}-macos-universal.zip"
 shasum -a 256 /tmp/intraflow.zip
 ```
 
-Then set `version "0.1.0"` / `sha256 "<output>"` in the tap's cask and push.
+Then set `version "0.1.1"` / `sha256 "<output>"` in the tap's cask and push.
 Homebrew's own tooling also works once the tap is published:
 
 ```bash
-brew bump-cask-pr --version 0.1.0 intraflow
+brew bump-cask-pr --version 0.1.1 intraflow
 ```
 
 ## Why the install command must be fully qualified
