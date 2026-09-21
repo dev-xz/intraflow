@@ -1,30 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="IntraFlow hosting active">
   <!--
     macOS menu-bar TEMPLATE image (HOSTED / 托管中).
-    Solid black only; the glyph is anti-aliased through the alpha channel and
-    macOS re-tints it for light/dark menu bars. Keep every fill pure #000.
-
-    Metaphor: a globe with a bold redirect arrow crossing it — "traffic is being
-    routed to the internal target".
-
-    The globe is drawn as an OUTLINE (not a filled disc) so the 16pt silhouette
-    stays open and the arrow reads clearly; a filled disc turned into an
-    unreadable blob at menu-bar size. The arrow is solid so it stays the
-    dominant element, and it is knocked out of the globe's outline so the two
-    shapes never touch and muddy each other.
+    The open gateway is the public entry point and the continuous arrow is
+    traffic being routed to the internal target. The 5px stroke and the
+    8..56 / 9..55 silhouette are intentionally sized for a 16pt status item.
+    Keep all visible pixels pure black; macOS supplies the template tint.
   -->
-  <defs>
-    <mask id="ifHostedGap" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-      <rect x="0" y="0" width="64" height="64" fill="#ffffff"/>
-      <!-- arrow bounding region, knocked out of the globe outline below -->
-      <rect x="14" y="28.6" width="19" height="7" fill="#000000"/>
-      <polygon points="33,20.6 49,32.1 33,43.6" fill="#000000"/>
-    </mask>
-  </defs>
-  <g mask="url(#ifHostedGap)" fill="none" stroke="#000000">
-    <circle cx="32" cy="32" r="21" stroke-width="4.4"/>
-    <ellipse cx="32" cy="32" rx="21" ry="8.2" stroke-width="3.4"/>
-  </g>
-  <rect x="14" y="28.6" width="19" height="7" fill="#000000"/>
-  <polygon points="33,20.6 49,32.1 33,43.6" fill="#000000"/>
+  <path
+    d="M31 11H18c-4.4 0-8 3.6-8 8v26c0 4.4 3.6 8 8 8h13"
+    fill="none"
+    stroke="#000000"
+    stroke-width="5"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+  <path
+    d="M30 32H47"
+    fill="none"
+    stroke="#000000"
+    stroke-width="5"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+  <path
+    d="M43 22L56 32L43 42Z"
+    fill="#000000"
+    stroke="#000000"
+    stroke-width="1"
+    stroke-linejoin="round"/>
 </svg>

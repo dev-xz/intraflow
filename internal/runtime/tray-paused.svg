@@ -1,23 +1,39 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="IntraFlow hosting paused">
   <!--
-    macOS menu-bar TEMPLATE image (PAUSED / 已暂停).
-    Solid black only; anti-aliased through alpha and re-tinted by macOS.
-
-    Metaphor: the SAME globe as tray-hosted.svg, drawn as an outline and
-    cancelled by a clean diagonal slash — unmistakably the "off" state of the
-    hosted icon while staying in the same visual family.
-    A knockout gap (transparent channel) separates the slash from the globe so
-    neither element muddies the other at 16pt.
+    macOS menu-bar TEMPLATE image (PAUSED / 非托管).
+    This keeps the active icon's open gateway, but breaks the route and uses
+    two clear pause bars instead of a diagonal disabled/error slash. The
+    shared 5px stroke and 4px pause bars keep the state change stable at 16pt.
+    Keep all visible pixels pure black; macOS supplies the template tint.
   -->
-  <defs>
-    <mask id="ifPausedGap" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-      <rect x="0" y="0" width="64" height="64" fill="#ffffff"/>
-      <line x1="12" y1="52" x2="52" y2="12" stroke="#000000" stroke-width="12" stroke-linecap="round"/>
-    </mask>
-  </defs>
-  <g mask="url(#ifPausedGap)" fill="none" stroke="#000000">
-    <circle cx="32" cy="32" r="21" stroke-width="4.5"/>
-    <ellipse cx="32" cy="32" rx="21" ry="8" stroke-width="3.2"/>
-  </g>
-  <line x1="12" y1="52" x2="52" y2="12" stroke="#000000" stroke-width="6" stroke-linecap="round"/>
+  <path
+    d="M31 11H18c-4.4 0-8 3.6-8 8v26c0 4.4 3.6 8 8 8h13"
+    fill="none"
+    stroke="#000000"
+    stroke-width="5"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+  <path
+    d="M30 32H37"
+    fill="none"
+    stroke="#000000"
+    stroke-width="5"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+  <line
+    x1="41"
+    y1="23"
+    x2="41"
+    y2="41"
+    stroke="#000000"
+    stroke-width="4"
+    stroke-linecap="round"/>
+  <line
+    x1="57"
+    y1="23"
+    x2="57"
+    y2="41"
+    stroke="#000000"
+    stroke-width="4"
+    stroke-linecap="round"/>
 </svg>
