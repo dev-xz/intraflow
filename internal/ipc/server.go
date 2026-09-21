@@ -15,8 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
-	"golang.org/x/sys/unix"
 )
 
 // SocketPath returns the path to the IPC unix socket under ~/.intraflow/.
@@ -64,8 +62,10 @@ func ListenAndServe(h Handler) (*Server, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("ipc: mkdir: %w", err)
 	}
-	// Remove a stale socket from a previous run.
-	_ = unix.Unlink(path)
+	// Remove a stale socket from a previous run. os.Remove is the portable
+	// equivalent of unlink: it removes a socket file on Unix and works on
+	// Windows 10+ too (which supports AF_UNIX sockets).
+	_ = os.Remove(path)
 
 	ln, err := net.Listen("unix", path)
 	if err != nil {
@@ -236,7 +236,7 @@ func (s *Server) Close() error {
 	s.wg.Wait()
 	path, perr := SocketPath()
 	if perr == nil {
-		_ = unix.Unlink(path)
+		_ = os.Remove(path)
 	}
 	return err
 }
