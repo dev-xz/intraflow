@@ -116,6 +116,32 @@ func TestBuildPlistEscapesXML(t *testing.T) {
 	}
 }
 
+// ----------------------- isTranslocated -----------------------
+
+func TestIsTranslocated(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{
+			name: "translocated",
+			path: "/private/var/folders/xx/xxxx/T/AppTranslocation/A8FF2634-.../d/IntraFlow.app/Contents/MacOS/intraflow",
+			want: true,
+		},
+		{
+			name: "applications",
+			path: "/Applications/IntraFlow.app/Contents/MacOS/intraflow",
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		if got := isTranslocated(c.path); got != c.want {
+			t.Errorf("isTranslocated(%q) [%s] = %v, want %v", c.path, c.name, got, c.want)
+		}
+	}
+}
+
 // ----------------------- path selection -----------------------
 
 func TestDarwinUseSMAppService_BundledAnd13(t *testing.T) {
@@ -160,6 +186,17 @@ func TestDarwinUseSMAppService_ExeError(t *testing.T) {
 	darwinSMAppServiceAvailable = func() bool { return true }
 	if darwinUseSMAppService() {
 		t.Errorf("expected fallback when executable path lookup fails")
+	}
+}
+
+func TestDarwinUseSMAppService_Translocated(t *testing.T) {
+	saveAutostartHooks(t)
+	darwinExePath = func() (string, error) {
+		return "/private/var/folders/xx/xxxx/T/AppTranslocation/A8FF2634-.../d/IntraFlow.app/Contents/MacOS/intraflow", nil
+	}
+	darwinSMAppServiceAvailable = func() bool { return true }
+	if darwinUseSMAppService() {
+		t.Errorf("expected LaunchAgent fallback when running translocated, even if bundled-looking + macOS >= 13")
 	}
 }
 
@@ -436,6 +473,28 @@ func TestSetAutoStart_FallbackDisable(t *testing.T) {
 	}
 	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("plist should be removed after disable, stat err=%v", err)
+	}
+}
+
+func TestSetAutoStart_TranslocatedRefused(t *testing.T) {
+	saveAutostartHooks(t)
+	withTempHome(t)
+	darwinExePath = func() (string, error) {
+		return "/private/var/folders/xx/xxxx/T/AppTranslocation/A8FF2634-.../d/IntraFlow.app/Contents/MacOS/intraflow", nil
+	}
+	darwinSMAppServiceAvailable = func() bool { return true }
+
+	ctlCalled := false
+	darwinRunLaunchctl = func(args ...string) ([]byte, error) {
+		ctlCalled = true
+		return nil, nil
+	}
+
+	if err := SetAutoStart(true); err == nil {
+		t.Fatalf("expected error when enabling autostart from a translocated path, got nil")
+	}
+	if ctlCalled {
+		t.Errorf("launchctl must not be called when refusing a translocated enable")
 	}
 }
 

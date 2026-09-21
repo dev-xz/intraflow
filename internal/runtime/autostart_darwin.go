@@ -37,6 +37,14 @@ var darwinRunLaunchctl = func(args ...string) ([]byte, error) {
 	return exec.Command("launchctl", args...).CombinedOutput()
 }
 
+// ---------------------- errors ----------------------
+
+// errTranslocated is returned when the app is running from a Gatekeeper App
+// Translocation mount (a random, read-only path that exists only while the app
+// runs). Registering SMAppService from there would store that ephemeral path as
+// the login item, producing a registration that breaks after reboot.
+var errTranslocated = errors.New("开机自启失败：应用正从 Gatekeeper 的临时随机路径（App Translocation）运行，重启后会失效。请先把 IntraFlow 拖入「应用程序」文件夹，执行 xattr -d com.apple.quarantine /Applications/intraflow.app 后重新打开，再开启开机自启")
+
 // ---------------------- path selection ----------------------
 
 // isBundled reports whether exePath is inside an .app bundle's MacOS dir, i.e.
@@ -64,12 +72,23 @@ func isBundled(exePath string) bool {
 	return true
 }
 
+// isTranslocated reports whether exePath is inside a Gatekeeper App
+// Translocation mount (…/AppTranslocation/<uuid>/d/App.app/…). Such a path is
+// random and vanishes when the app exits, so it must never be used to register
+// a login item.
+func isTranslocated(exePath string) bool {
+	return strings.Contains(filepath.ToSlash(exePath), "/AppTranslocation/")
+}
+
 // darwinUseSMAppService reports whether the SMAppService code path should be
 // used: only when the executable is inside an .app bundle AND the
 // SMAppService API is available (macOS >= 13).
 func darwinUseSMAppService() bool {
 	exe, err := darwinExePath()
 	if err != nil {
+		return false
+	}
+	if isTranslocated(exe) {
 		return false
 	}
 	if !isBundled(exe) {
@@ -120,6 +139,15 @@ func launchAgentState() (AutoStartState, error) {
 // ---------------------- contract: SetAutoStart ----------------------
 
 func setAutoStartDarwin(enabled bool) error {
+	// Never register a login item from an App Translocation mount: the path is
+	// random and disappears when the app exits, so the registration would be
+	// broken after reboot. Only guard the enable path — disabling must keep
+	// working so a user can remove a previously-created bad registration.
+	if enabled {
+		if exe, err := darwinExePath(); err == nil && isTranslocated(exe) {
+			return errTranslocated
+		}
+	}
 	if darwinUseSMAppService() {
 		if err := smAppServiceSetEnabled(enabled); err != nil {
 			// On ErrNotBundled, fall back to the LaunchAgent path.
