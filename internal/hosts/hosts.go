@@ -11,6 +11,7 @@ package hosts
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -18,6 +19,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"unicode/utf16"
 )
 
 // BeginMarker marks the start of the IntraFlow-managed region in the hosts
@@ -239,9 +241,9 @@ func sortStrings(s []string) {
 // `sudo` — sudo needs a TTY for its own password prompt, which a GUI app
 // launched from a dock/icon does not have, causing a silent failure with no
 // dialog at all.) On linux it prefers pkexec (a graphical polkit prompt) and
-// falls back to sudo (terminal prompt). On windows it is currently a stub
-// returning a not-yet-implemented error indicator via a sentinel command;
-// callers should handle GOOS==windows before reaching here in production code.
+// falls back to sudo (terminal prompt). On windows it uses PowerShell's
+// Start-Process -Verb RunAs, which raises the native UAC consent dialog; see
+// buildWindowsElevateCommand for details.
 func buildElevateCommand(targetPath string, sourcePath string) (name string, args []string) {
 	switch runtime.GOOS {
 	case "darwin":
@@ -262,20 +264,62 @@ func buildElevateCommand(targetPath string, sourcePath string) (name string, arg
 		inner := fmt.Sprintf(`/bin/cp '%s' '%s'`, sourcePath, targetPath)
 		return "pkexec", []string{"sh", "-c", inner}
 	case "windows":
-		// Windows elevation is handled via PowerShell Start-Process -Verb RunAs
-		// in a full implementation. For the MVP we return a no-op command; the
-		// caller returns ErrNotImplementedWindows before exec.
-		return "powershell", []string{"-NoProfile", "-Command", "exit 0"}
+		// Windows has no sudo. PowerShell's Start-Process -Verb RunAs raises
+		// the native UAC consent dialog in a child process; see
+		// buildWindowsElevateCommand for why the copy is passed encoded.
+		return buildWindowsElevateCommand(targetPath, sourcePath)
 	default:
 		inner := fmt.Sprintf(`/bin/cp '%s' '%s'`, sourcePath, targetPath)
 		return "sudo", []string{"sh", "-c", inner}
 	}
 }
 
-// ErrNotImplementedWindows is returned by WriteHostsElevated on Windows for
-// the MVP. A full PowerShell-based runas implementation is planned but not
-// yet wired up.
-var ErrNotImplementedWindows = errors.New("windows elevated write not yet implemented")
+// encodePowerShellCommand base64-encodes s as UTF-16LE, the format expected by
+// PowerShell's -EncodedCommand argument. Passing the inner script this way
+// avoids all shell quoting problems with paths that contain spaces or quotes.
+func encodePowerShellCommand(s string) string {
+	units := utf16.Encode([]rune(s))
+	buf := make([]byte, 0, len(units)*2)
+	for _, u := range units {
+		buf = append(buf, byte(u), byte(u>>8))
+	}
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
+// buildWindowsElevateCommand returns the powershell.exe invocation that copies
+// sourcePath over targetPath with administrator rights, triggering the native
+// UAC consent dialog.
+//
+// The inner copy script is passed via -EncodedCommand (UTF-16LE base64) so
+// paths need no escaping at the command-line layer. The outer script calls
+// Start-Process -Verb RunAs in a child powershell and waits for it, so the
+// caller gets a reliable exit status: 0 on success and 1223 (ERROR_CANCELLED)
+// when the user declines the UAC prompt.
+func buildWindowsElevateCommand(targetPath, sourcePath string) (string, []string) {
+	inner := "$ErrorActionPreference = 'Stop'\n" +
+		"Copy-Item -LiteralPath '" + psQuote(sourcePath) + "' -Destination '" + psQuote(targetPath) + "' -Force\n"
+	encoded := encodePowerShellCommand(inner)
+
+	outer := "$ErrorActionPreference = 'Stop'\n" +
+		"try {\n" +
+		"  $child = Start-Process -FilePath 'powershell.exe' " +
+		"-ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', '" + encoded + "') " +
+		"-Verb RunAs -Wait -PassThru\n" +
+		"  exit $child.ExitCode\n" +
+		"} catch {\n" +
+		"  if ($_.Exception.Message -match 'cancel') { exit 1223 }\n" +
+		"  [Console]::Error.WriteLine($_.Exception.Message)\n" +
+		"  exit 1\n" +
+		"}\n"
+
+	return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", outer}
+}
+
+// psQuote escapes a value for use inside a PowerShell single-quoted string:
+// a literal single quote is written as two single quotes.
+func psQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
 
 // WriteHostsElevated writes newContent to the system hosts file with
 // administrator privileges. It first stages newContent in a temp file owned
@@ -283,19 +327,15 @@ var ErrNotImplementedWindows = errors.New("windows elevated write not yet implem
 // to copy that temp file over the hosts file, and finally removes the temp
 // file.
 //
-// On darwin it uses `sudo osascript ... with administrator privileges`,
-// producing a native macOS password dialog. On linux it tries pkexec and
-// falls back to sudo (which prompts in the controlling terminal; this is a
-// known limitation for non-graphical contexts). On windows it currently
-// returns ErrNotImplementedWindows.
+// On darwin it uses `osascript ... with administrator privileges`, producing a
+// native macOS password dialog. On linux it tries pkexec and falls back to
+// sudo (which prompts in the controlling terminal; this is a known limitation
+// for non-graphical contexts). On windows it uses PowerShell's
+// Start-Process -Verb RunAs to raise the native UAC consent dialog.
 //
 // If the user cancels the elevation prompt, WriteHostsElevated returns
 // ErrElevationCancelled (use IsCancellation to test).
 func WriteHostsElevated(newContent string) error {
-	if runtime.GOOS == "windows" {
-		return ErrNotImplementedWindows
-	}
-
 	targetPath := HostsPath()
 
 	tmp, err := os.CreateTemp("", "intraflow-hosts-*.txt")
@@ -342,6 +382,12 @@ func runElevated(name string, args []string) error {
 		// (the osascript path is notoriously environment-sensitive).
 		log.Printf("hosts: elevated write failed: cmd=%s %v exit=%v stderr=%q stdout=%q",
 			name, args, err, strings.TrimSpace(stderr.String()), strings.TrimSpace(stdout.String()))
+		// Windows propagates ERROR_CANCELLED (1223) from the UAC dialog as
+		// the child's exit code.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && isCancellationExitCode(exitErr.ExitCode()) {
+			return fmt.Errorf("%w: %s", ErrElevationCancelled, strings.TrimSpace(stderr.String()))
+		}
 		// osascript reports user cancellation with exit status 1 and a message
 		// like "User canceled" / "user canceled".
 		if strings.Contains(low, "user canceled") || strings.Contains(low, "user cancelled") {
@@ -350,6 +396,13 @@ func runElevated(name string, args []string) error {
 		return fmt.Errorf("elevated write failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// isCancellationExitCode reports whether an elevated child's exit code means
+// the user declined the elevation prompt. 1223 is Win32 ERROR_CANCELLED, which
+// buildWindowsElevateCommand propagates from the UAC dialog.
+func isCancellationExitCode(code int) bool {
+	return code == 1223
 }
 
 // IsCancellation reports whether err is or wraps ErrElevationCancelled.

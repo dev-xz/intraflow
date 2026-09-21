@@ -57,7 +57,10 @@ hosts writes go through the GUI process via a two-phase IPC flow:
   resolution. Status (`StatusInfo`) carries State/Reason/ResolvedIP.
 - `hosts` — hosts file read/write with `# BEGIN/END IntraFlow` marker zone,
   consistency check, elevated write via osascript (darwin) / pkexec+sudo
-  (linux) / not-implemented (windows).
+  (linux) / PowerShell `Start-Process -Verb RunAs` (windows, native UAC dialog).
+  The Windows copy script is passed via `-EncodedCommand` (UTF-16LE base64) so
+  paths need no shell escaping; UAC decline surfaces as exit code 1223, which
+  `runElevated` maps to `ErrElevationCancelled`.
 - `orchestrator` — ties config+hosts+forwarder together; Prepare/Complete pairs
   for ApplyAll/Pause/Resume/FixNow (single-record Save/Disable/Delete are gone).
   Effective forward state = `!settings.Paused && forward.Enabled`; hosts zone =

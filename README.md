@@ -221,5 +221,7 @@ notice，不影响发版）。tap 仓库的初始化见 `packaging/homebrew/READ
 
 - **macOS** — 主要目标，原生体验（WKWebView + 原生管理员密码框 + 开机自启：通过
   `SMAppService` 注册到"系统设置 → 登录项 → 登陆时打开"，用户可随时在系统设置里开关）
-- **Windows** — hosts 写入（UAC）和自启（注册表 Run 项）已实现
+- **Windows** — hosts 写入（PowerShell `Start-Process -Verb RunAs`，原生 UAC 弹窗）和自启
+  （注册表 Run 项）已实现。注意 Windows 分支尚未在真机上验证过（CI 只覆盖到构建与单元
+  测试层面）
 - **Linux** — hosts 写入（pkexec/sudo）和自启（.desktop autostart）已实现

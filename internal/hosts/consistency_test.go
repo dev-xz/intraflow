@@ -1,11 +1,13 @@
 package hosts
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 // TestCheckConsistency_Consistent: config domains match the zone exactly.
@@ -128,6 +130,110 @@ func TestBuildElevateCommand_Darwin(t *testing.T) {
 	default:
 		if name != "sudo" {
 			t.Fatalf("name = %q, want \"sudo\" (fallback)", name)
+		}
+	}
+}
+
+// decodeEncodedCommandArg extracts the value following "-EncodedCommand" in the
+// outer PowerShell script, base64-decodes it, and decodes the bytes as
+// UTF-16LE, returning the inner script text. It fails the test if the argument
+// is missing or malformed. Kept in the test file because the production code
+// only ever encodes; nothing decodes.
+func decodeEncodedCommandArg(t *testing.T, outer string) string {
+	t.Helper()
+
+	// In the ArgumentList array the pair appears as
+	// '-EncodedCommand', '<base64>'. Match the whole delimiter so we land
+	// directly on the opening quote of the base64 value.
+	const marker = "'-EncodedCommand', '"
+	idx := strings.Index(outer, marker)
+	if idx < 0 {
+		t.Fatalf("outer script missing %q: %q", marker, outer)
+	}
+	rest := outer[idx+len(marker):]
+
+	close := strings.Index(rest, "'")
+	if close < 0 {
+		t.Fatalf("unterminated quoted value after %q in %q", marker, outer)
+	}
+	encoded := rest[:close]
+
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("base64 decode %q: %v", encoded, err)
+	}
+	if len(raw)%2 != 0 {
+		t.Fatalf("UTF-16LE payload has odd length %d", len(raw))
+	}
+	units := make([]uint16, 0, len(raw)/2)
+	for i := 0; i < len(raw); i += 2 {
+		units = append(units, uint16(raw[i])|uint16(raw[i+1])<<8)
+	}
+	return string(utf16.Decode(units))
+}
+
+// TestBuildWindowsElevateCommand verifies the pure Windows command builder:
+// the executable is powershell, the outer script raises UAC via Start-Process
+// -Verb RunAs and maps cancellation to 1223, and the inner copy script (passed
+// via -EncodedCommand) copies the source over the target. The builder takes no
+// runtime.GOOS dependency, so this runs identically on macOS/Linux CI.
+func TestBuildWindowsElevateCommand(t *testing.T) {
+	target := `C:\Windows\System32\drivers\etc\hosts`
+	source := `C:\Users\me\AppData\Local\Temp\intraflow-hosts-123.txt`
+
+	name, args := buildWindowsElevateCommand(target, source)
+	if name != "powershell" {
+		t.Fatalf("name = %q, want \"powershell\"", name)
+	}
+	if len(args) < 3 || args[0] != "-NoProfile" || args[1] != "-NonInteractive" || args[2] != "-Command" {
+		t.Fatalf("expected args to start with -NoProfile -NonInteractive -Command, got %+v", args)
+	}
+
+	outer := strings.Join(args, " ")
+	for _, want := range []string{"Start-Process", "-Verb RunAs", "1223"} {
+		if !strings.Contains(outer, want) {
+			t.Fatalf("outer script missing %q: %q", want, outer)
+		}
+	}
+
+	inner := decodeEncodedCommandArg(t, outer)
+	for _, want := range []string{"Copy-Item", "-Force", source, target} {
+		if !strings.Contains(inner, want) {
+			t.Fatalf("inner script missing %q: %q", want, inner)
+		}
+	}
+}
+
+// TestBuildWindowsElevateCommand_EscapesSingleQuote checks that a source path
+// containing a single quote is doubled when embedded in the PowerShell
+// single-quoted literal, so the inner script remains syntactically valid.
+func TestBuildWindowsElevateCommand_EscapesSingleQuote(t *testing.T) {
+	target := `C:\Windows\System32\drivers\etc\hosts`
+	source := `C:\Users\o'brien\Temp\x.txt`
+
+	_, args := buildWindowsElevateCommand(target, source)
+	outer := strings.Join(args, " ")
+	inner := decodeEncodedCommandArg(t, outer)
+
+	want := `C:\Users\o''brien\Temp\x.txt`
+	if !strings.Contains(inner, want) {
+		t.Fatalf("inner script missing escaped path %q: %q", want, inner)
+	}
+	if strings.Contains(inner, `o'brien`) {
+		t.Fatalf("inner script contains unescaped single quote: %q", inner)
+	}
+}
+
+// TestIsCancellationExitCode documents the exit-code contract used to detect a
+// declined UAC prompt: 1223 (Win32 ERROR_CANCELLED) is cancellation; success
+// (0) and other failures (1, 5) are not.
+func TestIsCancellationExitCode(t *testing.T) {
+	if !isCancellationExitCode(1223) {
+		t.Fatalf("isCancellationExitCode(1223) = false, want true")
+	}
+	for _, code := range []int{0, 1, 5} {
+		if isCancellationExitCode(code) {
+			t.Fatalf("isCancellationExitCode(%d) = true, want false", code)
 		}
 	}
 }
